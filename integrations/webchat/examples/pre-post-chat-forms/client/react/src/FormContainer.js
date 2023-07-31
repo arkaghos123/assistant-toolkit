@@ -7,7 +7,7 @@ import './FormContainer.css';
 
 /**
  * This component is responsible for managing the pre-chat and post-chat forms. When mounted, it will add listeners
- * for the appropriate window events so it can show the forms at the appropriate time.
+ * for the appropriate view change events so it can show the forms at the appropriate time.
  */
 function FormContainer({ instance }) {
   // This is the resolve function for resolving the promises returned by our open and close event handlers. Those
@@ -29,28 +29,28 @@ function FormContainer({ instance }) {
   // visible (or null for none).
   const [currentPanel, setCurrentPanel] = useState(null);
 
-  // We want to keep track of the window open event when it occurs so we can use it to cancel the opening if the
+  // We want to keep track of the view change event when it occurs so we can use it to cancel the change if the
   // user clicks cancel.
-  const windowOpenEvent = useRef();
+  const viewChangeEvent = useRef();
 
   // When this component is mounted, add the listeners for the events.
   useEffect(() => {
     // Add listeners that will use a custom panel to display custom content when web chat is opened or closed. You
-    // can use window:close instead of window:pre:close but window:pre:close gives you the option of including a
+    // can use view:change instead of view:pre:change but view:pre:change gives you the option of including a
     // cancel button to allow the user to keep web chat open. You can also use the agent start and end chat events
     // to accomplish the same thing when users are interacting with a human agent from a service desk. Using
-    // "window:open" allows us to display a custom panel after the web chat window has been opened; with
-    // "window:pre:open" web chat will not be open yet and you can't show a custom panel if web chat is closed.
-    instance.on({ type: 'window:open', handler: windowOpenHandler });
-    instance.on({ type: 'window:pre:close', handler: preCloseHandler });
+    // "view:change" allows us to display a custom panel after the web chat window has been opened; with
+    // "view:pre:change" web chat will not be open yet and you can't show a custom panel if web chat is closed.
+    instance.on({ type: 'view:change', handler: viewChangeHandler });
+    instance.on({ type: 'view:pre:change', handler: viewPreChangeHandler });
     // This listener will be used to send the information gathered in the pre-chat form to the assistant.
     instance.on({ type: 'pre:send', handler: preSendHandler });
 
     instance.customPanels.getPanel().hostElement.classList.add('HostElement');
 
     return () => {
-      instance.off({ type: 'window:open', handler: windowOpenHandler });
-      instance.off({ type: 'window:pre:close', handler: preCloseHandler });
+      instance.off({ type: 'view:change', handler: viewChangeHandler });
+      instance.off({ type: 'view:pre:change', handler: viewPreChangeHandler });
       instance.off({ type: 'pre:send', handler: preSendHandler });
     };
   }, [instance]);
@@ -84,12 +84,14 @@ function FormContainer({ instance }) {
   }, [currentPanel, instance]);
 
   /**
-   * This function is called during the opening process for web chat.
+   * This function is called after a view change has occurred.
    */
-  function windowOpenHandler(event) {
-    if (!fullNameRef.current) {
+  function viewChangeHandler(event) {
+    // If we haven't yet gotten a name from the user and the main window is opening, then show a pre-chat form.
+    const mainWindowOpening = !event.oldViewState.mainWindow && event.newViewState.mainWindow;
+    if (!fullNameRef.current && mainWindowOpening) {
       // Save a reference to this event. We can use this to cancel the open if the user clicks the cancel button.
-      windowOpenEvent.current = event;
+      viewChangeEvent.current = event;
 
       // Return a Promise which web chat will wait for before completing the opening process. Our custom code will
       // resolve this Promise after the user completes the pre-chat form. If they click cancel, we can use the event
@@ -103,21 +105,32 @@ function FormContainer({ instance }) {
   }
 
   /**
-   * This function is called before web chat begins the closing process.
+   * This function is called before a view change has occurred.
    */
-  function preCloseHandler() {
-    if (hasSentMessageRef.current && !sessionStorage.getItem('POST_CHAT_SHOWN')) {
+  function viewPreChangeHandler(event) {
+    // If the launcher is opening, the user has sent a message, and we have not asked the user for feedback, then
+    // display a post-chat form. This will cover the case where web chat is minimized from either the main window or from
+    // a tour.
+    const launcherOpening = !event.oldViewState.launcher && event.newViewState.launcher;
+    const tourOrMainWindowOpen = event.oldViewState.mainWindow || event.oldViewState.tour;
+    if (
+      launcherOpening &&
+      tourOrMainWindowOpen &&
+      hasSentMessageRef.current &&
+      !sessionStorage.getItem('POST_CHAT_SHOWN')
+    ) {
       // Set a session variable so we don't show this form again.
       sessionStorage.setItem('POST_CHAT_SHOWN', 'true');
 
-      // Return a Promise which web chat will wait for before completing the closing process. Our custom code will
-      // resolve this Promise after the user completes the post-chat form. You could include a cancel button in the
-      // form if you wanted to allow the user to go back without actually closing web chat. But this example just
-      // lets the user optionally provide feedback.
-      return new Promise((resolve) => {
-        promiseResolveRef.current = resolve;
-        changePanel('post-chat');
+      // To show the pre-chat form, we need to make sure that only the main window is open. This may have the effect
+      // of cancelling an event closing the main window. Then the user can fill out the form and the form will
+      // need to issue a second view change to close to the launcher. We won't use a Promise to wait in this case.
+      Object.keys(event.newViewState).forEach((key) => {
+        event.newViewState[key] = false;
       });
+      event.newViewState.mainWindow = true;
+
+      changePanel('post-chat');
     }
     return null;
   }
@@ -159,9 +172,9 @@ function FormContainer({ instance }) {
 
   const onPreChatCancel = useCallback(() => {
     // Cancel the open event which will cause web chat to close.
-    if (windowOpenEvent.current) {
-      windowOpenEvent.current.cancelOpen = true;
-      windowOpenEvent.current = null;
+    if (viewChangeEvent.current) {
+      viewChangeEvent.current.cancelViewChange = true;
+      viewChangeEvent.current = null;
     }
     changePanel(null);
   }, []);
@@ -173,10 +186,15 @@ function FormContainer({ instance }) {
     console.log(`The user selected a rating of "${satisfactionRating}" and optional feedback "${feedback}".`);
 
     changePanel(null);
+
+    // Once the user has completed the form, then close everything to the launcher.
+    instance.changeView('launcher');
   }, []);
 
   const onPostChangeCancel = useCallback(() => {
     changePanel(null);
+    // Once the user has completed the form, then close everything to the launcher.
+    instance.changeView('launcher');
   }, []);
 
   return (
@@ -201,6 +219,7 @@ FormContainer.propTypes = {
     }),
     on: PropTypes.func,
     off: PropTypes.func,
+    changeView: PropTypes.func,
   }),
 };
 
